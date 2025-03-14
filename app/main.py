@@ -27,7 +27,10 @@ app.add_middleware(
 )
 
 # Gemini API configuration
-GEMINI_API_KEY = "AIzaSyDvG6S1h5yyqGzT5tLGGlAYtusrOYbS934"  # Replace with your actual API key
+# Load Gemini API configuration from environment variables
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
+if not GEMINI_API_KEY:
+    raise Exception("GEMINI_API_KEY environment variable is not set!")
 GEMINI_API_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent"
 
 class QuestionType(str, Enum):
