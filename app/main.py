@@ -94,7 +94,7 @@ def extract_text_from_image(base64_image: str, mime_type: str) -> str:
 def get_question_prompt(text: str, question_type: str, num_questions: int, num_options: int, difficulty: str) -> str:
     base_prompt = f"Generate {num_questions} quiz questions of difficulty '{difficulty}' based solely on the following text:\n\n{text}\n\nEach question must be directly answerable from the text and include a correct answer and a brief explanation. Format your response as:\n\nQuestion [number]:\n[Question text]\n[Options or matching pairs if applicable]\nCorrect answer: [answer]\nExplanation: [explanation]\n\n"
     if question_type == "multiple_choice":
-        return base_prompt + f"Questions must be multiple-choice with exactly {num_options} options labeled a), b), c), etc."
+        return base_prompt + f"Questions must be multiple-choice with exactly {num_options} unique options labeled a), b), c), etc. Do not generate more than {num_options} options, and ensure no options are repeated."
     elif question_type == "true_false":
         return base_prompt + "Questions must be true/false with options 'True' and 'False'."
     elif question_type == "fill_in_the_blank":
@@ -104,10 +104,10 @@ def get_question_prompt(text: str, question_type: str, num_questions: int, num_o
     elif question_type == "matching":
         return base_prompt + f"Questions must be matching type with {num_options} pairs of items to match (e.g., terms and definitions), labeled a), b), etc. for one list and 1), 2), etc. for the other."
     elif question_type == "mixed":
-        return base_prompt + "Generate a mix of multiple-choice, true/false, fill-in-the-blank, short-answer, and matching questions, ensuring variety."
+        return base_prompt + f"Generate a mix of multiple-choice (with exactly {num_options} unique options), true/false, fill-in-the-blank, short-answer, and matching questions, ensuring variety. For multiple-choice questions, do not generate more than {num_options} options and ensure no options are repeated."
     return base_prompt
 
-def parse_gemini_response(result_text: str, num_questions: int, requested_question_type: Union[str, List[str]]) -> List[QuizQuestion]:
+def parse_gemini_response(result_text: str, num_questions: int, requested_question_type: Union[str, List[str]], num_options: int) -> List[QuizQuestion]:
     questions = []
     question_blocks = re.split(r'\n\s*Question \d+:', result_text)
     is_mixed = isinstance(requested_question_type, str) and requested_question_type == "mixed" or isinstance(requested_question_type, list) and "mixed" in requested_question_type
@@ -125,9 +125,12 @@ def parse_gemini_response(result_text: str, num_questions: int, requested_questi
                 explanation = "No explanation provided"
 
                 # Extract options or matching pairs
-                option_matches = re.findall(r'[a-d]\) (.*?)(?:\n|$)', block)
+                option_matches = re.findall(r'[a-z]\) (.*?)(?:\n|$)', block)
                 if option_matches:
-                    options = [opt.strip() for opt in option_matches]
+                    # Remove duplicates and trim to num_options
+                    unique_options = list(dict.fromkeys(opt.strip() for opt in option_matches))  # Preserve order, remove duplicates
+                    options = unique_options[:num_options]  # Take only requested number of options
+
                 matching_pairs = re.findall(r'[a-d]\) (.*?) - \d+\) (.*?)(?:\n|$)', block)
                 if matching_pairs:
                     options = [f"{left} - {right}" for left, right in matching_pairs]
@@ -143,7 +146,6 @@ def parse_gemini_response(result_text: str, num_questions: int, requested_questi
 
                 # Determine question type
                 if is_mixed and len(requested_types) > 1:
-                    # For mixed type, infer based on content but cycle through requested types if possible
                     if matching_pairs:
                         q_type = QuestionType.matching
                     elif len(options) == 2 and "True" in options and "False" in options:
@@ -155,8 +157,7 @@ def parse_gemini_response(result_text: str, num_questions: int, requested_questi
                     else:
                         q_type = QuestionType.multiple_choice
                 else:
-                    # Use the requested type directly unless it's clearly mismatched
-                    q_type = QuestionType(requested_types[0])  # Default to first type
+                    q_type = QuestionType(requested_types[0])
                     if matching_pairs and q_type != QuestionType.matching:
                         q_type = QuestionType.matching
                     elif "_____" in question_text and q_type not in [QuestionType.fill_in_the_blank, QuestionType.short_answer]:
@@ -165,9 +166,28 @@ def parse_gemini_response(result_text: str, num_questions: int, requested_questi
                         q_type = QuestionType.true_false
 
                 # Adjust correct answer for multiple choice if needed
-                if q_type == QuestionType.multiple_choice and correct_answer in "abcd":
-                    correct_index = ord(correct_answer.lower()) - ord('a')
-                    correct_answer = options[correct_index] if 0 <= correct_index < len(options) else "Invalid answer"
+                if q_type == QuestionType.multiple_choice:
+                    if correct_answer in "abcdefghijklmnopqrstuvwxyz"[:num_options]:
+                        correct_index = ord(correct_answer.lower()) - ord('a')
+                        correct_answer = options[correct_index] if 0 <= correct_index < len(options) else "Invalid answer"
+                    # Ensure correct answer is in options; if not, adjust
+                    if correct_answer not in options and options:
+                        correct_answer = options[0]  # Fallback to first option if mismatch
+
+                # Validate multiple-choice options count
+                if q_type == QuestionType.multiple_choice:
+                    if len(options) != num_options:
+                        print(f"Warning: Question {idx} has {len(options)} options instead of {num_options}")
+                        if len(options) < num_options:
+                            # Pad with generic unique options if too few
+                            existing = set(options)
+                            i = len(options)
+                            while len(options) < num_options:
+                                new_option = f"Option {chr(97 + i)}"
+                                if new_option not in existing:
+                                    options.append(new_option)
+                                    existing.add(new_option)
+                                    i += 1
 
                 questions.append(QuizQuestion(
                     question=question_text,
@@ -199,13 +219,13 @@ def generate_quiz_with_gemini(content: Union[str, List[Dict[str, Any]]], num_que
             prompt = get_question_prompt(text, q_type, n, num_options, difficulty)
             response = call_gemini_api([{"text": prompt}])
             result_text = response.get("candidates", [{}])[0].get("content", {}).get("parts", [{}])[0].get("text", "")
-            all_questions.extend(parse_gemini_response(result_text, n, q_type))
+            all_questions.extend(parse_gemini_response(result_text, n, q_type, num_options))
     else:
         for q_type in question_type_list:
             prompt = get_question_prompt(text, q_type, num_questions, num_options, difficulty)
             response = call_gemini_api([{"text": prompt}])
             result_text = response.get("candidates", [{}])[0].get("content", {}).get("parts", [{}])[0].get("text", "")
-            all_questions.extend(parse_gemini_response(result_text, num_questions, q_type))
+            all_questions.extend(parse_gemini_response(result_text, num_questions, q_type, num_options))
 
     summary_prompt = f"Generate a brief summary (3-5 sentences) of the following text:\n\n{text}"
     summary_response = call_gemini_api([{"text": summary_prompt}])
