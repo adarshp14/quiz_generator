@@ -1,13 +1,15 @@
 # Quiz Generator
 
-Welcome to **Quiz Generator**, a simple and efficient tool designed to create customizable quizzes for educational, recreational, or professional purposes. This project allows users to generate quizzes with ease, leveraging [Python] to provide a seamless experience.
+Welcome to **Quiz Generator**, a simple and efficient tool designed to create customizable quizzes for educational, recreational, or professional purposes. This project features an API built with **FastAPI**, leverages the power of the **Gemma3 by google** for intelligent question generation, and provides a seamless experience for creating dynamic quizzes.
 
 ## Features
 
 - **Dynamic Quiz Creation**: Generate quizzes with multiple-choice, true/false, or open-ended questions.
 - **Customizable Options**: Adjust question count, difficulty, and categories to suit your needs.
 - **User-Friendly Interface**: Intuitive design for both quiz creators and takers.
-- **Export Capabilities**: Save quizzes as [e.g., JSON, PDF, or text files] for easy sharing or printing.
+- **Export Capabilities**: Save quizzes as JSON or text files for easy sharing or printing.
+- **FastAPI Integration**: Access quiz generation functionalities via a RESTful API.
+- **AI-Powered**: Utilizes Grok 3 by xAI for smart, context-aware question generation.
 - **Open Source**: Fully customizable codebase—fork it, tweak it, make it your own!
 
 ## Installation
