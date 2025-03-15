@@ -1,6 +1,6 @@
 # Quiz Generator
 
-Welcome to **Quiz Generator**, a simple and efficient tool designed to create customizable quizzes for educational, recreational, or professional purposes. This project allows users to generate quizzes with ease, leveraging [insert primary technology/language, e.g., Python, JavaScript, etc.] to provide a seamless experience.
+Welcome to **Quiz Generator**, a simple and efficient tool designed to create customizable quizzes for educational, recreational, or professional purposes. This project allows users to generate quizzes with ease, leveraging [Python] to provide a seamless experience.
 
 ## Features
 
