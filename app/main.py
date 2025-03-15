@@ -12,6 +12,11 @@ import re
 import random
 import requests
 import base64
+import logging
+
+# Set up logging
+logging.basicConfig(level=logging.DEBUG)
+logger = logging.getLogger(__name__)
 
 app = FastAPI()
 
@@ -92,9 +97,9 @@ def extract_text_from_image(base64_image: str, mime_type: str) -> str:
     return response.get("candidates", [{}])[0].get("content", {}).get("parts", [{}])[0].get("text", "")
 
 def get_question_prompt(text: str, question_type: str, num_questions: int, num_options: int, difficulty: str) -> str:
-    base_prompt = f"Generate {num_questions} quiz questions of difficulty '{difficulty}' based solely on the following text:\n\n{text}\n\nEach question must be directly answerable from the text and include a correct answer and a brief explanation. Format your response as:\n\nQuestion [number]:\n[Question text]\n[Options or matching pairs if applicable]\nCorrect answer: [answer]\nExplanation: [explanation]\n\n"
+    base_prompt = f"Generate exactly {num_questions} quiz questions of difficulty '{difficulty}' based solely on the following text:\n\n{text}\n\nEach question must be directly answerable from the text and include a correct answer and a brief explanation. Format your response as:\n\nQuestion [number]:\n[Question text]\n[Options or matching pairs if applicable]\nCorrect answer: [answer]\nExplanation: [explanation]\n\n"
     if question_type == "multiple_choice":
-        return base_prompt + f"Questions must be multiple-choice with exactly {num_options} unique options labeled a), b), c), etc. Do not generate more than {num_options} options, and ensure no options are repeated."
+        return base_prompt + f"Questions must be multiple-choice with exactly {num_options} unique options labeled a), b), c), etc. Do not generate more or fewer than {num_options} options, and ensure no options are repeated."
     elif question_type == "true_false":
         return base_prompt + "Questions must be true/false with options 'True' and 'False'."
     elif question_type == "fill_in_the_blank":
@@ -104,101 +109,114 @@ def get_question_prompt(text: str, question_type: str, num_questions: int, num_o
     elif question_type == "matching":
         return base_prompt + f"Questions must be matching type with {num_options} pairs of items to match (e.g., terms and definitions), labeled a), b), etc. for one list and 1), 2), etc. for the other."
     elif question_type == "mixed":
-        return base_prompt + f"Generate a mix of multiple-choice (with exactly {num_options} unique options), true/false, fill-in-the-blank, short-answer, and matching questions, ensuring variety. For multiple-choice questions, do not generate more than {num_options} options and ensure no options are repeated."
+        return base_prompt + f"Generate exactly {num_questions} questions with a mix of multiple-choice (with exactly {num_options} unique options), true/false, fill-in-the-blank, short-answer, and matching questions, ensuring variety. For multiple-choice questions, do not generate more or fewer than {num_options} options and ensure no options are repeated."
     return base_prompt
 
 def parse_gemini_response(result_text: str, num_questions: int, requested_question_type: Union[str, List[str]], num_options: int) -> List[QuizQuestion]:
     questions = []
-    question_blocks = re.split(r'\n\s*Question \d+:', result_text)
+    question_blocks = re.split(r'\n\s*Question \d+:', result_text)[1:]  # Skip the first empty block
     is_mixed = isinstance(requested_question_type, str) and requested_question_type == "mixed" or isinstance(requested_question_type, list) and "mixed" in requested_question_type
     requested_types = requested_question_type if isinstance(requested_question_type, list) else [requested_question_type]
 
-    if len(question_blocks) > 1:
-        for idx, block in enumerate(question_blocks[1:], start=1):
-            if not block.strip():
-                continue
-            try:
-                lines = block.strip().split("\n")
-                question_text = lines[0].strip()
-                options = []
-                correct_answer = None
-                explanation = "No explanation provided"
+    logger.debug(f"Found {len(question_blocks)} question blocks for {num_questions} requested questions")
 
-                # Extract options or matching pairs
-                option_matches = re.findall(r'[a-z]\) (.*?)(?:\n|$)', block)
-                if option_matches:
-                    # Remove duplicates and trim to num_options
-                    unique_options = list(dict.fromkeys(opt.strip() for opt in option_matches))  # Preserve order, remove duplicates
-                    options = unique_options[:num_options]  # Take only requested number of options
+    for idx, block in enumerate(question_blocks, start=1):
+        if not block.strip():
+            continue
+        try:
+            lines = block.strip().split("\n")
+            question_text = lines[0].strip()
+            options = []
+            correct_answer = None
+            explanation = "No explanation provided"
 
-                matching_pairs = re.findall(r'[a-d]\) (.*?) - \d+\) (.*?)(?:\n|$)', block)
+            # Extract options or matching pairs
+            option_matches = re.findall(r'[a-z]\) (.*?)(?:\n|$)', block)
+            if option_matches:
+                # Remove duplicates and trim to num_options
+                unique_options = list(dict.fromkeys(opt.strip() for opt in option_matches))  # Preserve order, remove duplicates
+                options = unique_options[:num_options]  # Take only requested number of options
+
+            matching_pairs = re.findall(r'[a-d]\) (.*?) - \d+\) (.*?)(?:\n|$)', block)
+            if matching_pairs:
+                options = [f"{left} - {right}" for left, right in matching_pairs]
+                correct_answer = [f"{left} - {right}" for left, right in matching_pairs]
+
+            # Extract correct answer and explanation
+            correct_match = re.search(r'Correct answer: (.*?)(?:\n|$)', block, re.DOTALL)
+            if correct_match:
+                correct_answer = correct_match.group(1).strip()
+            exp_match = re.search(r'Explanation: (.*?)(?:\n\n|$)', block, re.DOTALL)
+            if exp_match:
+                explanation = exp_match.group(1).strip()
+
+            # Determine question type
+            if is_mixed and len(requested_types) > 1:
                 if matching_pairs:
-                    options = [f"{left} - {right}" for left, right in matching_pairs]
-                    correct_answer = [f"{left} - {right}" for left, right in matching_pairs]
-
-                # Extract correct answer and explanation
-                correct_match = re.search(r'Correct answer: (.*?)(?:\n|$)', block, re.DOTALL)
-                if correct_match:
-                    correct_answer = correct_match.group(1).strip()
-                exp_match = re.search(r'Explanation: (.*?)(?:\n\n|$)', block, re.DOTALL)
-                if exp_match:
-                    explanation = exp_match.group(1).strip()
-
-                # Determine question type
-                if is_mixed and len(requested_types) > 1:
-                    if matching_pairs:
-                        q_type = QuestionType.matching
-                    elif len(options) == 2 and "True" in options and "False" in options:
-                        q_type = QuestionType.true_false
-                    elif "_____" in question_text or "fill in the blank" in question_text.lower():
-                        q_type = QuestionType.fill_in_the_blank
-                    elif not options and not matching_pairs:
-                        q_type = QuestionType.short_answer
-                    else:
-                        q_type = QuestionType.multiple_choice
+                    q_type = QuestionType.matching
+                elif len(options) == 2 and "True" in options and "False" in options:
+                    q_type = QuestionType.true_false
+                elif "_____" in question_text or "fill in the blank" in question_text.lower():
+                    q_type = QuestionType.fill_in_the_blank
+                elif not options and not matching_pairs:
+                    q_type = QuestionType.short_answer
                 else:
-                    q_type = QuestionType(requested_types[0])
-                    if matching_pairs and q_type != QuestionType.matching:
-                        q_type = QuestionType.matching
-                    elif "_____" in question_text and q_type not in [QuestionType.fill_in_the_blank, QuestionType.short_answer]:
-                        q_type = QuestionType.fill_in_the_blank
-                    elif len(options) == 2 and "True" in options and "False" in options and q_type != QuestionType.true_false:
-                        q_type = QuestionType.true_false
+                    q_type = QuestionType.multiple_choice
+            else:
+                q_type = QuestionType(requested_types[0])
+                if matching_pairs and q_type != QuestionType.matching:
+                    q_type = QuestionType.matching
+                elif "_____" in question_text and q_type not in [QuestionType.fill_in_the_blank, QuestionType.short_answer]:
+                    q_type = QuestionType.fill_in_the_blank
+                elif len(options) == 2 and "True" in options and "False" in options and q_type != QuestionType.true_false:
+                    q_type = QuestionType.true_false
 
-                # Adjust correct answer for multiple choice if needed
-                if q_type == QuestionType.multiple_choice:
-                    if correct_answer in "abcdefghijklmnopqrstuvwxyz"[:num_options]:
-                        correct_index = ord(correct_answer.lower()) - ord('a')
-                        correct_answer = options[correct_index] if 0 <= correct_index < len(options) else "Invalid answer"
-                    # Ensure correct answer is in options; if not, adjust
-                    if correct_answer not in options and options:
-                        correct_answer = options[0]  # Fallback to first option if mismatch
+            # Adjust correct answer for multiple choice if needed
+            if q_type == QuestionType.multiple_choice:
+                if correct_answer in "abcdefghijklmnopqrstuvwxyz"[:num_options]:
+                    correct_index = ord(correct_answer.lower()) - ord('a')
+                    correct_answer = options[correct_index] if 0 <= correct_index < len(options) else "Invalid answer"
+                # Ensure correct answer is in options; if not, adjust
+                if correct_answer not in options and options:
+                    correct_answer = options[0]  # Fallback to first option if mismatch
 
-                # Validate multiple-choice options count
-                if q_type == QuestionType.multiple_choice:
-                    if len(options) != num_options:
-                        print(f"Warning: Question {idx} has {len(options)} options instead of {num_options}")
-                        if len(options) < num_options:
-                            # Pad with generic unique options if too few
-                            existing = set(options)
-                            i = len(options)
-                            while len(options) < num_options:
-                                new_option = f"Option {chr(97 + i)}"
-                                if new_option not in existing:
-                                    options.append(new_option)
-                                    existing.add(new_option)
-                                    i += 1
+            # Validate multiple-choice options count
+            if q_type == QuestionType.multiple_choice:
+                if len(options) != num_options:
+                    logger.warning(f"Question {idx} has {len(options)} options instead of {num_options}")
+                    if len(options) < num_options:
+                        # Pad with generic unique options if too few
+                        existing = set(options)
+                        i = len(options)
+                        while len(options) < num_options:
+                            new_option = f"Option {chr(97 + i)}"
+                            if new_option not in existing:
+                                options.append(new_option)
+                                existing.add(new_option)
+                                i += 1
 
-                questions.append(QuizQuestion(
-                    question=question_text,
-                    options=options if options and q_type not in [QuestionType.fill_in_the_blank, QuestionType.short_answer] else None,
-                    correct_answer=correct_answer if not matching_pairs else correct_answer,
-                    explanation=explanation,
-                    question_type=q_type
-                ))
-            except Exception as e:
-                print(f"Error parsing question block {idx}: {e}")
-    return questions[:num_questions]
+            questions.append(QuizQuestion(
+                question=question_text,
+                options=options if options and q_type not in [QuestionType.fill_in_the_blank, QuestionType.short_answer] else None,
+                correct_answer=correct_answer if not matching_pairs else correct_answer,
+                explanation=explanation,
+                question_type=q_type
+            ))
+        except Exception as e:
+            logger.error(f"Error parsing question block {idx}: {e}")
+
+    logger.debug(f"Parsed {len(questions)} questions before trimming")
+    # Ensure we return exactly num_questions, padding if necessary
+    while len(questions) < num_questions:
+        logger.warning(f"Padding question {len(questions) + 1} due to insufficient questions from API")
+        questions.append(QuizQuestion(
+            question=f"Dummy question {len(questions) + 1} due to API shortfall",
+            options=[f"Option {chr(97 + i)}" for i in range(num_options)] if requested_types[0] == "multiple_choice" else None,
+            correct_answer="Option a" if requested_types[0] == "multiple_choice" else "Dummy answer",
+            explanation="Generated as a fallback due to insufficient API response",
+            question_type=QuestionType(requested_types[0])
+        ))
+    return questions[:num_questions]  # Return exactly the requested number
 
 def generate_quiz_with_gemini(content: Union[str, List[Dict[str, Any]]], num_questions: int, num_options: int, question_types: Union[str, List[str]], difficulty: str):
     if isinstance(content, list) and "inline_data" in content[0]:
@@ -219,21 +237,28 @@ def generate_quiz_with_gemini(content: Union[str, List[Dict[str, Any]]], num_que
             prompt = get_question_prompt(text, q_type, n, num_options, difficulty)
             response = call_gemini_api([{"text": prompt}])
             result_text = response.get("candidates", [{}])[0].get("content", {}).get("parts", [{}])[0].get("text", "")
-            all_questions.extend(parse_gemini_response(result_text, n, q_type, num_options))
+            parsed_questions = parse_gemini_response(result_text, n, q_type, num_options)
+            logger.debug(f"Generated {len(parsed_questions)} questions for type {q_type}")
+            all_questions.extend(parsed_questions)
     else:
         for q_type in question_type_list:
             prompt = get_question_prompt(text, q_type, num_questions, num_options, difficulty)
             response = call_gemini_api([{"text": prompt}])
             result_text = response.get("candidates", [{}])[0].get("content", {}).get("parts", [{}])[0].get("text", "")
-            all_questions.extend(parse_gemini_response(result_text, num_questions, q_type, num_options))
+            parsed_questions = parse_gemini_response(result_text, num_questions, q_type, num_options)
+            logger.debug(f"Generated {len(parsed_questions)} questions for type {q_type}")
+            all_questions.extend(parsed_questions)
 
     summary_prompt = f"Generate a brief summary (3-5 sentences) of the following text:\n\n{text}"
     summary_response = call_gemini_api([{"text": summary_prompt}])
     summary = summary_response.get("candidates", [{}])[0].get("content", {}).get("parts", [{}])[0].get("text", "")
 
+    logger.debug(f"Total questions before shuffle: {len(all_questions)}")
     random.shuffle(all_questions)
+    final_questions = all_questions[:num_questions]
+    logger.debug(f"Returning {len(final_questions)} questions")
     return QuizResponse(
-        questions=all_questions[:num_questions],
+        questions=final_questions,
         source_text_summary=summary
     )
 
