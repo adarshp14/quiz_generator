@@ -6,32 +6,27 @@ import uvicorn
 import os
 import tempfile
 import docx
-import fitz  # PyMuPDF for PDF files
+import fitz
 from typing import Optional, List, Dict, Any, Union
 import re
 import random
-import json
 import requests
-import numpy as np
 import base64
 
 app = FastAPI()
 
-# Add CORS middleware
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Adjust this in production
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# Gemini API configuration
-# Load Gemini API configuration from environment variables
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 if not GEMINI_API_KEY:
     raise Exception("GEMINI_API_KEY environment variable is not set!")
-GEMINI_API_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent"
+GEMINI_API_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent"  # Replace with actual URL
 
 class QuestionType(str, Enum):
     multiple_choice = "multiple_choice"
@@ -39,6 +34,7 @@ class QuestionType(str, Enum):
     fill_in_the_blank = "fill_in_the_blank"
     short_answer = "short_answer"
     matching = "matching"
+    mixed = "mixed"
 
 class DifficultyLevel(str, Enum):
     easy = "easy"
@@ -65,204 +61,145 @@ class QuizResponse(BaseModel):
 
 def extract_text_from_docx(file_path):
     doc = docx.Document(file_path)
-    text = ""
-    for para in doc.paragraphs:
-        text += para.text + "\n"
-    return text
+    return "\n".join(para.text for para in doc.paragraphs)
 
 def extract_text_from_pdf(file_path):
-    text = ""
     with fitz.open(file_path) as doc:
-        for page in doc:
-            text += page.get_text() + "\n"
-    return text
+        return "\n".join(page.get_text() for page in doc)
 
 def extract_text_from_txt(file_path):
     with open(file_path, 'r', encoding='utf-8') as file:
         return file.read()
 
 def encode_image_to_base64(image_path):
-    """Reads an image file and encodes it to Base64 format."""
     with open(image_path, "rb") as image_file:
         return base64.b64encode(image_file.read()).decode("utf-8")
 
 def call_gemini_api(parts: List[Dict[str, Any]]):
-    """Call the Gemini API with the given parts (text or inline_data for images)"""
-    headers = {
-        "Content-Type": "application/json"
-    }
-    
-    data = {
-        "contents": [{
-            "parts": parts
-        }]
-    }
-    
-    response = requests.post(
-        f"{GEMINI_API_URL}?key={GEMINI_API_KEY}",
-        headers=headers,
-        json=data
-    )
-    
+    headers = {"Content-Type": "application/json"}
+    data = {"contents": [{"parts": parts}]}
+    response = requests.post(f"{GEMINI_API_URL}?key={GEMINI_API_KEY}", headers=headers, json=data)
     if response.status_code != 200:
         raise Exception(f"API call failed: {response.text}")
-    
     return response.json()
 
 def extract_text_from_image(base64_image: str, mime_type: str) -> str:
-    """Use Gemini to extract text or describe the image."""
     parts = [
-        {
-            "inline_data": {
-                "mime_type": mime_type,
-                "data": base64_image
-            }
-        },
-        {
-            "text": "Extract any text from the image or provide a detailed description of the image."
-        }
+        {"inline_data": {"mime_type": mime_type, "data": base64_image}},
+        {"text": "Extract any text from the image or provide a detailed description of the image."}
     ]
-    
     response = call_gemini_api(parts)
-    extracted_text = response.get("candidates", [{}])[0].get("content", {}).get("parts", [{}])[0].get("text", "")
-    return extracted_text
+    return response.get("candidates", [{}])[0].get("content", {}).get("parts", [{}])[0].get("text", "")
 
-def generate_quiz_with_gemini(content: Union[str, List[Dict[str, Any]]], num_questions: int, num_options: int, question_types: Union[str, List[str]], difficulty: str):
-    """Generate a complete quiz using Gemini"""
-    
-    # Determine question type string
-    question_type_str = ""
-    if isinstance(question_types, list):
-        question_type_str = ", ".join(question_types)
-    else:
-        question_type_str = question_types
-    
-    # If content is a list (likely from image), extract text first
-    if isinstance(content, list) and content and "inline_data" in content[0]:
-        base64_image = content[0]["inline_data"]["data"]
-        mime_type = content[0]["inline_data"]["mime_type"]
-        text = extract_text_from_image(base64_image, mime_type)
-    else:
-        text = content[0]["text"] if isinstance(content, list) and "text" in content[0] else content
+def get_question_prompt(text: str, question_type: str, num_questions: int, num_options: int, difficulty: str) -> str:
+    base_prompt = f"Generate {num_questions} quiz questions of difficulty '{difficulty}' based solely on the following text:\n\n{text}\n\nEach question must be directly answerable from the text and include a correct answer and a brief explanation. Format your response as:\n\nQuestion [number]:\n[Question text]\n[Options or matching pairs if applicable]\nCorrect answer: [answer]\nExplanation: [explanation]\n\n"
+    if question_type == "multiple_choice":
+        return base_prompt + f"Questions must be multiple-choice with exactly {num_options} options labeled a), b), c), etc."
+    elif question_type == "true_false":
+        return base_prompt + "Questions must be true/false with options 'True' and 'False'."
+    elif question_type == "fill_in_the_blank":
+        return base_prompt + "Questions must be fill-in-the-blank with a single blank (_____) and no options."
+    elif question_type == "short_answer":
+        return base_prompt + "Questions must be short-answer with no options, requiring a brief text response."
+    elif question_type == "matching":
+        return base_prompt + f"Questions must be matching type with {num_options} pairs of items to match (e.g., terms and definitions), labeled a), b), etc. for one list and 1), 2), etc. for the other."
+    elif question_type == "mixed":
+        return base_prompt + "Generate a mix of multiple-choice, true/false, fill-in-the-blank, short-answer, and matching questions, ensuring variety."
+    return base_prompt
 
-    # Improved prompt that ensures questions are directly based on the text
-    prompt = f"""
-Generate {num_questions} quiz questions based solely on the following text. Each question must:
-- Be directly answerable from the text.
-- Contain exactly {num_options} answer options.
-- Include a clear, correct answer (identified by its corresponding letter) and a brief explanation of why that answer is correct.
-- Not reference meta-information such as page numbers or formatting details.
-
-Text:
-{text}
-
-Format your response as follows:
-
-Question 1:
-[Question text]
-
-a) [Option 1]
-b) [Option 2]
-c) [Option 3]
-d) [Option 4]
-
-Correct answer: [letter of correct option]
-Explanation: [explanation]
-
-Repeat for each question.
-    """
-    
-    response = call_gemini_api([{"text": prompt}])
-    result_text = response.get("candidates", [{}])[0].get("content", {}).get("parts", [{}])[0].get("text", "")
-    
-    # Parse the result
+def parse_gemini_response(result_text: str, num_questions: int) -> List[QuizQuestion]:
     questions = []
-    
-    # Get a summary of the text
-    summary_prompt = f"Generate a brief summary (3-5 sentences) of the following text:\n\n{text}"
-    summary_response = call_gemini_api([{"text": summary_prompt}])
-    summary = summary_response.get("candidates", [{}])[0].get("content", {}).get("parts", [{}])[0].get("text", "")
-    
-    # Extract questions using regex
     question_blocks = re.split(r'\n\s*Question \d+:', result_text)
-    if len(question_blocks) > 1:  # Skip the first element which is usually intro text
+    if len(question_blocks) > 1:
         for block in question_blocks[1:]:
             if not block.strip():
                 continue
-                
             try:
-                # Extract question text
-                question_text = block.strip().split("\n\n")[0].strip()
-                
-                # Extract options
+                lines = block.strip().split("\n")
+                question_text = lines[0].strip()
                 options = []
+                correct_answer = None
+                explanation = "No explanation provided"
                 option_matches = re.findall(r'[a-d]\) (.*?)(?:\n|$)', block)
-                for option in option_matches:
-                    options.append(option.strip())
-                
-                # Extract correct answer
-                correct_answer_match = re.search(r'Correct answer: ([a-d])', block)
-                if correct_answer_match:
-                    correct_letter = correct_answer_match.group(1)
-                    correct_index = ord(correct_letter) - ord('a')
-                    if 0 <= correct_index < len(options):
-                        correct_answer = options[correct_index]
-                    else:
-                        correct_answer = "Unable to determine correct answer"
-                else:
-                    correct_answer = "Unable to determine correct answer"
-                
-                # Extract explanation
-                explanation_match = re.search(r'Explanation: (.*?)(?:\n\n|$)', block, re.DOTALL)
-                explanation = explanation_match.group(1).strip() if explanation_match else "No explanation provided"
-                
-                # Determine question type
-                if len(options) == 2 and "True" in options and "False" in options:
+                if option_matches:
+                    options = [opt.strip() for opt in option_matches]
+                matching_pairs = re.findall(r'[a-d]\) (.*?) - \d+\) (.*?)(?:\n|$)', block)
+                if matching_pairs:
+                    options = [f"{left} - {right}" for left, right in matching_pairs]
+                    correct_answer = [f"{left} - {right}" for left, right in matching_pairs]
+                correct_match = re.search(r'Correct answer: (.*?)(?:\n|$)', block, re.DOTALL)
+                if correct_match:
+                    correct_answer = correct_match.group(1).strip()
+                exp_match = re.search(r'Explanation: (.*?)(?:\n\n|$)', block, re.DOTALL)
+                if exp_match:
+                    explanation = exp_match.group(1).strip()
+                if matching_pairs:
+                    q_type = QuestionType.matching
+                elif len(options) == 2 and "True" in options and "False" in options:
                     q_type = QuestionType.true_false
-                elif "fill in the blank" in question_text.lower() or "_____" in question_text:
+                elif "_____" in question_text or "fill in the blank" in question_text.lower():
                     q_type = QuestionType.fill_in_the_blank
-                elif not options:
+                    options = None
+                elif not options and not matching_pairs:
                     q_type = QuestionType.short_answer
                 else:
                     q_type = QuestionType.multiple_choice
-                
-                question = QuizQuestion(
+                if q_type == QuestionType.multiple_choice and correct_answer in "abcd":
+                    correct_index = ord(correct_answer.lower()) - ord('a')
+                    correct_answer = options[correct_index] if 0 <= correct_index < len(options) else "Invalid answer"
+                questions.append(QuizQuestion(
                     question=question_text,
                     options=options if options else None,
-                    correct_answer=correct_answer,
+                    correct_answer=correct_answer if not matching_pairs else correct_answer,
                     explanation=explanation,
                     question_type=q_type
-                )
-                questions.append(question)
+                ))
             except Exception as e:
                 print(f"Error parsing question block: {e}")
-    
+    return questions[:num_questions]
+
+def generate_quiz_with_gemini(content: Union[str, List[Dict[str, Any]]], num_questions: int, num_options: int, question_types: Union[str, List[str]], difficulty: str):
+    if isinstance(content, list) and "inline_data" in content[0]:
+        text = extract_text_from_image(content[0]["inline_data"]["data"], content[0]["inline_data"]["mime_type"])
+    else:
+        text = content[0]["text"] if isinstance(content, list) and "text" in content[0] else content
+    question_type_list = question_types if isinstance(question_types, list) else [question_types]
+    all_questions = []
+    if "mixed" in question_type_list:
+        types = [t for t in QuestionType if t != QuestionType.mixed]
+        questions_per_type = max(1, num_questions // len(types))
+        remainder = num_questions % len(types)
+        for q_type in types:
+            n = questions_per_type + (1 if remainder > 0 else 0)
+            remainder -= 1 if remainder > 0 else 0
+            prompt = get_question_prompt(text, q_type, n, num_options, difficulty)
+            response = call_gemini_api([{"text": prompt}])
+            result_text = response.get("candidates", [{}])[0].get("content", {}).get("parts", [{}])[0].get("text", "")
+            all_questions.extend(parse_gemini_response(result_text, n))
+    else:
+        for q_type in question_type_list:
+            prompt = get_question_prompt(text, q_type, num_questions, num_options, difficulty)
+            response = call_gemini_api([{"text": prompt}])
+            result_text = response.get("candidates", [{}])[0].get("content", {}).get("parts", [{}])[0].get("text", "")
+            all_questions.extend(parse_gemini_response(result_text, num_questions))
+    summary_prompt = f"Generate a brief summary (3-5 sentences) of the following text:\n\n{text}"
+    summary_response = call_gemini_api([{"text": summary_prompt}])
+    summary = summary_response.get("candidates", [{}])[0].get("content", {}).get("parts", [{}])[0].get("text", "")
+    random.shuffle(all_questions)
     return QuizResponse(
-        questions=questions[:num_questions],
+        questions=all_questions[:num_questions],
         source_text_summary=summary
     )
 
 @app.post("/generate-text-quiz", response_model=QuizResponse)
 async def generate_quiz_from_text(request: TextQuizRequest):
-    """Generate a quiz from provided text input"""
     try:
-        # Extract parameters from the request
-        text = request.text
-        num_questions = request.num_questions
-        num_options = request.num_options
-        question_types = request.question_type
-        difficulty = request.difficulty
-
-        # Convert question_type to string or list of strings
-        question_types_str = question_types if isinstance(question_types, list) else [question_types]
-
-        # Generate the quiz
         return generate_quiz_with_gemini(
-            text,
-            num_questions,
-            num_options,
-            question_types_str,
-            difficulty
+            request.text,
+            request.num_questions,
+            request.num_options,
+            request.question_type,
+            request.difficulty
         )
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to generate quiz: {str(e)}")
@@ -275,16 +212,11 @@ async def generate_quiz_from_file(
     question_type: str = Form(QuestionType.multiple_choice),
     difficulty: str = Form(DifficultyLevel.medium)
 ):
-    """Generate a quiz from an uploaded file"""
-    # Create temp file
     with tempfile.NamedTemporaryFile(delete=False) as temp:
         temp.write(await file.read())
         temp_path = temp.name
-    
     try:
-        # Extract text based on file type
         file_extension = os.path.splitext(file.filename)[1].lower()
-        
         if file_extension == ".docx":
             text = extract_text_from_docx(temp_path)
         elif file_extension == ".pdf":
@@ -296,10 +228,7 @@ async def generate_quiz_from_file(
             content = [{"inline_data": {"mime_type": f"image/{file_extension[1:]}", "data": base64_image}}]
         else:
             raise HTTPException(status_code=400, detail="Unsupported file format")
-        
-        # Generate quiz
         question_types = question_type.split(",") if "," in question_type else question_type
-        
         return generate_quiz_with_gemini(
             content if file_extension in [".png", ".jpeg", ".jpg"] else text,
             num_questions,
@@ -310,7 +239,6 @@ async def generate_quiz_from_file(
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to generate quiz: {str(e)}")
     finally:
-        # Clean up temp file
         if os.path.exists(temp_path):
             os.unlink(temp_path)
 
