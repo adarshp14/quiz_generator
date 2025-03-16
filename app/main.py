@@ -109,68 +109,111 @@ def get_question_prompt(text: str, question_type: str, num_questions: int, num_o
 
 def parse_gemini_response(result_text: str, num_questions: int, requested_question_type: Union[str, List[str]], num_options: int) -> List[QuizQuestion]:
     questions = []
-
-    # Check if the candidate text uses markdown markers
+    
+    # --- Markdown Parsing Branch ---
     if "**Question:**" in result_text:
-        # Split by the markdown marker; ignore any preamble text
         parts = re.split(r'\*\*Question:\*\*', result_text, flags=re.IGNORECASE)
         for block in parts[1:]:
             block = block.strip()
             if not block:
                 continue
-            # Split the block by **Options:** marker
-            question_split = re.split(r'\*\*Options:\*\*', block, flags=re.IGNORECASE)
-            if len(question_split) < 2:
-                continue
-            question_text = question_split[0].strip()
-            # Now split the remainder by **Answer:**
-            opt_ans_split = re.split(r'\*\*Answer:\*\*', question_split[1], flags=re.IGNORECASE)
-            if len(opt_ans_split) < 2:
-                continue
-            options_text = opt_ans_split[0].strip()
-            answer_text = opt_ans_split[1].strip()
-            # Parse options: expect lines starting with a letter followed by a parenthesis
-            options = []
-            for line in options_text.splitlines():
-                line = line.strip()
-                if not line:
-                    continue
-                match = re.match(r'([A-Za-z])\)\s*(.*)', line)
-                if match:
-                    options.append(match.group(2).strip())
-            correct_answer = answer_text
-            # Handle cases like "B) The centennial of the French Revolution."
-            letter_match = re.match(r'^\s*([A-Za-z])\)?\s*(.*)', correct_answer)
-            if letter_match:
-                letter = letter_match.group(1).lower()
-                remainder = letter_match.group(2).strip()
-                if remainder:
-                    correct_answer = remainder
-                else:
-                    idx = ord(letter) - ord('a')
-                    if 0 <= idx < len(options):
-                        correct_answer = options[idx]
-                    else:
-                        print(f"Warning: correct answer letter '{letter}' out of range for options: {options}")
-            explanation = f"The correct answer is {correct_answer}."
-            q_type = QuestionType.multiple_choice
-            questions.append(QuizQuestion(
-                question=question_text,
-                options=options,
-                correct_answer=correct_answer,
-                explanation=explanation,
-                question_type=q_type
-            ))
-        return questions[:num_questions]
 
-    # Fallback: old-style parsing using "Question <number>:" markers
+            # If there is an **Options:** marker, treat as multiple-choice or matching.
+            if "**Options:**" in block:
+                question_split = re.split(r'\*\*Options:\*\*', block, flags=re.IGNORECASE)
+                if len(question_split) < 2:
+                    continue
+                question_text = question_split[0].strip()
+                opt_ans_split = re.split(r'\*\*Answer:\*\*', question_split[1], flags=re.IGNORECASE)
+                if len(opt_ans_split) < 2:
+                    continue
+                options_text = opt_ans_split[0].strip()
+                answer_text = opt_ans_split[1].strip()
+                options = []
+                for line in options_text.splitlines():
+                    line = line.strip()
+                    if not line:
+                        continue
+                    match = re.match(r'([A-Za-z])\)\s*(.*)', line)
+                    if match:
+                        options.append(match.group(2).strip())
+                correct_answer = answer_text
+                letter_match = re.match(r'^\s*([A-Za-z])\)?\s*(.*)', correct_answer)
+                if letter_match:
+                    letter = letter_match.group(1).lower()
+                    remainder = letter_match.group(2).strip()
+                    if remainder:
+                        correct_answer = remainder
+                    else:
+                        idx = ord(letter) - ord('a')
+                        if 0 <= idx < len(options):
+                            correct_answer = options[idx]
+                        else:
+                            print(f"Warning: correct answer letter '{letter}' out of range for options: {options}")
+                explanation = f"The correct answer is {correct_answer}."
+                q_type = QuestionType.multiple_choice
+                questions.append(QuizQuestion(
+                    question=question_text,
+                    options=options,
+                    correct_answer=correct_answer,
+                    explanation=explanation,
+                    question_type=q_type
+                ))
+            else:
+                # No **Options:** marker. Use requested type or clues in text.
+                qa_split = re.split(r'\*\*Answer:\*\*', block, flags=re.IGNORECASE)
+                if len(qa_split) < 2:
+                    continue
+                question_text = qa_split[0].strip()
+                answer_text = qa_split[1].strip()
+                # Determine question type based on requested type and content clues.
+                req_types = []
+                if isinstance(requested_question_type, list):
+                    req_types = [t.lower() for t in requested_question_type]
+                else:
+                    req_types = [requested_question_type.lower()]
+                if "true_false" in req_types or answer_text.strip().lower() in ["true", "false"]:
+                    q_type = QuestionType.true_false
+                    options = ["True", "False"]
+                    correct_answer = answer_text.strip()
+                elif "fill_in_the_blank" in req_types or "_____" in question_text:
+                    q_type = QuestionType.fill_in_the_blank
+                    options = None
+                    correct_answer = answer_text.strip()
+                elif "short_answer" in req_types:
+                    q_type = QuestionType.short_answer
+                    options = None
+                    correct_answer = answer_text.strip()
+                else:
+                    # Default: if answer is exactly "True"/"False", it's true_false; else if blank exists, fill_in_the_blank; else short_answer.
+                    if answer_text.strip().lower() in ["true", "false"]:
+                        q_type = QuestionType.true_false
+                        options = ["True", "False"]
+                    elif "_____" in question_text:
+                        q_type = QuestionType.fill_in_the_blank
+                        options = None
+                    else:
+                        q_type = QuestionType.short_answer
+                        options = None
+                    correct_answer = answer_text.strip()
+                explanation = f"The correct answer is {correct_answer}."
+                questions.append(QuizQuestion(
+                    question=question_text,
+                    options=options,
+                    correct_answer=correct_answer,
+                    explanation=explanation,
+                    question_type=q_type
+                ))
+        return questions[:num_questions]
+    
+    # --- Fallback Parsing Branch (old-style) ---
     question_blocks = re.split(r'\n\s*Question\s+\d+:', result_text, flags=re.IGNORECASE)
     is_mixed = (
         (isinstance(requested_question_type, str) and requested_question_type.lower() == "mixed") or 
         (isinstance(requested_question_type, list) and any(q.lower() == "mixed" for q in requested_question_type))
     )
     requested_types = requested_question_type if isinstance(requested_question_type, list) else [requested_question_type]
-
+    
     if len(question_blocks) > 1:
         for idx, block in enumerate(question_blocks[1:], start=1):
             block = block.strip()
@@ -182,22 +225,22 @@ def parse_gemini_response(result_text: str, num_questions: int, requested_questi
                 options = []
                 correct_answer = None
                 explanation = "No explanation provided"
-
+                
                 option_matches = re.findall(r'^[a-z]\)\s*(.*?)(?=\n|$)', block, flags=re.MULTILINE)
                 if option_matches:
                     unique_options = list(dict.fromkeys(opt.strip() for opt in option_matches))
                     options = unique_options[:num_options]
-
+                
                 matching_pairs = re.findall(r'^[a-z]\)\s*(.*?)\s*-\s*\d+\)\s*(.*?)(?=\n|$)', block, flags=re.MULTILINE)
-
+                
                 correct_match = re.search(r'(?i)^\s*correct answer:\s*(.*?)(?:\n|$)', block, flags=re.MULTILINE)
                 if correct_match:
                     correct_answer = correct_match.group(1).strip()
-
+                
                 exp_match = re.search(r'(?i)^\s*explanation:\s*(.*)', block, flags=re.MULTILINE)
                 if exp_match:
                     explanation = exp_match.group(1).strip()
-
+                
                 if is_mixed and len(requested_types) > 1:
                     if matching_pairs:
                         q_type = QuestionType.matching
@@ -217,11 +260,11 @@ def parse_gemini_response(result_text: str, num_questions: int, requested_questi
                         q_type = QuestionType.fill_in_the_blank
                     elif len(options) == 2 and "True" in options and "False" in options and q_type != QuestionType.true_false:
                         q_type = QuestionType.true_false
-
+                
                 if matching_pairs:
                     options = [f"{left.strip()} - {right.strip()}" for left, right in matching_pairs]
                     correct_answer = options.copy()
-
+                
                 if q_type == QuestionType.multiple_choice and options:
                     letter_match = re.match(r'^\s*([a-zA-Z])\)?\s*$', correct_answer or "")
                     if letter_match:
@@ -234,7 +277,7 @@ def parse_gemini_response(result_text: str, num_questions: int, requested_questi
                     else:
                         if correct_answer and correct_answer not in options:
                             print(f"Warning: correct answer '{correct_answer}' not found in options {options}")
-
+                
                 if q_type == QuestionType.true_false:
                     options = ["True", "False"]
                     if correct_answer.lower() in ["true", "t", "yes", "a"]:
@@ -244,7 +287,7 @@ def parse_gemini_response(result_text: str, num_questions: int, requested_questi
                     else:
                         correct_answer = "True"
                         print(f"Warning: Could not determine true/false answer for question {idx}, defaulting to True")
-
+                
                 if q_type == QuestionType.fill_in_the_blank:
                     options = None
                     if "_____" not in question_text:
@@ -254,7 +297,7 @@ def parse_gemini_response(result_text: str, num_questions: int, requested_questi
                             mid = len(words) // 2
                             words.insert(mid, "_____")
                             question_text = " ".join(words)
-
+                
                 if q_type == QuestionType.short_answer:
                     options = None
                     if not correct_answer or correct_answer == "Invalid answer":
@@ -265,7 +308,7 @@ def parse_gemini_response(result_text: str, num_questions: int, requested_questi
                             sentences = explanation.split(".")
                             if sentences:
                                 correct_answer = sentences[0].strip()
-
+                
                 if q_type == QuestionType.multiple_choice:
                     if len(options) < num_options:
                         existing = set(options)
@@ -282,12 +325,12 @@ def parse_gemini_response(result_text: str, num_questions: int, requested_questi
                             if correct_answer_index >= num_options:
                                 options[num_options-1], options[correct_answer_index] = options[correct_answer_index], options[num_options-1]
                         options = options[:num_options]
-
+                
                 if not correct_answer:
                     correct_answer = "Answer not provided"
                 if not explanation or explanation.lower().strip() == "no explanation provided":
                     explanation = f"The correct answer is {correct_answer}."
-
+                
                 questions.append(QuizQuestion(
                     question=question_text,
                     options=options if options and q_type not in [QuestionType.fill_in_the_blank, QuestionType.short_answer] else None,
@@ -298,7 +341,7 @@ def parse_gemini_response(result_text: str, num_questions: int, requested_questi
             except Exception as e:
                 print(f"Error parsing question block {idx}: {e}")
                 continue
-
+    
     return questions[:num_questions]
 
 def generate_quiz_with_gemini(content: Union[str, List[Dict[str, Any]]], num_questions: int, num_options: int, question_types: Union[str, List[str]], difficulty: str):
