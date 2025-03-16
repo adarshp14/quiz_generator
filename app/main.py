@@ -131,7 +131,7 @@ def parse_gemini_response(result_text: str, num_questions: int, requested_questi
                     unique_options = list(dict.fromkeys(opt.strip() for opt in option_matches))  # Preserve order, remove duplicates
                     options = unique_options[:num_options]  # Take only requested number of options
 
-                matching_pairs = re.findall(r'[a-d]\) (.*?) - \d+\) (.*?)(?:\n|$)', block)
+                matching_pairs = re.findall(r'[a-z]\) (.*?) - \d+\) (.*?)(?:\n|$)', block)
                 if matching_pairs:
                     options = [f"{left} - {right}" for left, right in matching_pairs]
                     correct_answer = [f"{left} - {right}" for left, right in matching_pairs]
@@ -165,8 +165,9 @@ def parse_gemini_response(result_text: str, num_questions: int, requested_questi
                     elif len(options) == 2 and "True" in options and "False" in options and q_type != QuestionType.true_false:
                         q_type = QuestionType.true_false
 
-                # Adjust correct answer for multiple choice if needed
+                # Validate and adjust answers based on question type
                 if q_type == QuestionType.multiple_choice:
+                    # Adjust correct answer for multiple choice if needed
                     if correct_answer in "abcdefghijklmnopqrstuvwxyz"[:num_options]:
                         correct_index = ord(correct_answer.lower()) - ord('a')
                         correct_answer = options[correct_index] if 0 <= correct_index < len(options) else "Invalid answer"
@@ -209,6 +210,113 @@ def parse_gemini_response(result_text: str, num_questions: int, requested_questi
                         # If still no match, log a warning and keep original answer
                         if not found_match:
                             print(f"Warning: Correct answer '{correct_answer}' not found in options: {options}")
+                
+                # Validate true/false answers
+                elif q_type == QuestionType.true_false:
+                    # Ensure options are exactly "True" and "False"
+                    if len(options) < 2:
+                        options = ["True", "False"]
+                    else:
+                        # Normalize option texts
+                        options = ["True", "False"]
+                    
+                    # Normalize the correct answer to be exactly "True" or "False"
+                    if correct_answer.lower() in ["true", "t", "yes"]:
+                        correct_answer = "True"
+                    elif correct_answer.lower() in ["false", "f", "no"]:
+                        correct_answer = "False"
+                    # Handle case where answer is given as a letter
+                    elif correct_answer.lower() == "a":
+                        correct_answer = "True"
+                    elif correct_answer.lower() == "b":
+                        correct_answer = "False"
+                    
+                    # Validate against explanation if still unclear
+                    if correct_answer not in ["True", "False"]:
+                        if "true" in explanation.lower() and "correct" in explanation.lower():
+                            correct_answer = "True"
+                        elif "false" in explanation.lower() and "correct" in explanation.lower():
+                            correct_answer = "False"
+                        else:
+                            # Default to "True" if can't determine
+                            correct_answer = "True"
+                            print(f"Warning: Could not determine true/false answer for question {idx}, defaulting to True")
+
+                # Validate fill-in-the-blank
+                elif q_type == QuestionType.fill_in_the_blank:
+                    # No options needed
+                    options = None
+                    
+                    # Ensure question has a blank
+                    if "_____" not in question_text:
+                        question_text = question_text.replace("...", "_____")
+                        if "_____" not in question_text:
+                            # Try to insert a blank at a reasonable position
+                            if ": " in question_text:
+                                parts = question_text.split(": ", 1)
+                                question_text = f"{parts[0]}: _____ {parts[1]}"
+                            else:
+                                # Split the sentence and add blank near the middle
+                                words = question_text.split()
+                                mid = len(words) // 2
+                                words.insert(mid, "_____")
+                                question_text = " ".join(words)
+                
+                # Validate short answer questions
+                elif q_type == QuestionType.short_answer:
+                    # No options needed
+                    options = None
+                    
+                    # Ensure correct answer is extracted from explanation if missing
+                    if not correct_answer or correct_answer == "Invalid answer":
+                        # Try to extract from explanation
+                        key_phrases = re.findall(r'"([^"]+)"', explanation)
+                        if key_phrases:
+                            correct_answer = key_phrases[0]
+                        else:
+                            # Default to first sentence of explanation
+                            sentences = explanation.split(".")
+                            if sentences:
+                                correct_answer = sentences[0].strip()
+                
+                # Validate matching questions
+                elif q_type == QuestionType.matching:
+                    # If not properly parsed as matching pairs
+                    if not matching_pairs and options:
+                        # Try to parse from the existing options and correct answer
+                        # This is complex and may not always work
+                        pairs = []
+                        # First, check if we have pairs in the format "left - right"
+                        for option in options:
+                            if " - " in option:
+                                parts = option.split(" - ", 1)
+                                if len(parts) == 2:
+                                    pairs.append((parts[0], parts[1]))
+                        
+                        # If we found pairs, use them
+                        if pairs:
+                            options = [f"{left} - {right}" for left, right in pairs]
+                            correct_answer = options  # In matching, all pairs are the correct answers
+                        else:
+                            # Try to extract matching pairs from the correct answer
+                            if isinstance(correct_answer, str) and " - " in correct_answer:
+                                parts = correct_answer.split(" - ", 1)
+                                if len(parts) == 2:
+                                    pairs = [(parts[0], parts[1])]
+                                    options = [f"{left} - {right}" for left, right in pairs]
+                                    correct_answer = options
+                            else:
+                                # If we still can't parse matching pairs, create a default matching question
+                                print(f"Warning: Could not parse matching pairs for question {idx}")
+                                # Create a simple matching pair from the correct answer and first option
+                                if options and len(options) >= 2:
+                                    pairs = [(options[0], options[1])]
+                                    options = [f"{left} - {right}" for left, right in pairs]
+                                    correct_answer = options
+                                else:
+                                    # If we can't create a pair, change question type to short answer
+                                    q_type = QuestionType.short_answer
+                                    options = None
 
                 # Validate multiple-choice options count
                 if q_type == QuestionType.multiple_choice:
@@ -224,16 +332,40 @@ def parse_gemini_response(result_text: str, num_questions: int, requested_questi
                                     options.append(new_option)
                                     existing.add(new_option)
                                     i += 1
+                        elif len(options) > num_options:
+                            # Trim options if too many, but ensure correct answer is kept
+                            if correct_answer in options:
+                                # Keep the correct answer
+                                correct_answer_index = options.index(correct_answer)
+                                # If the correct answer is not among the first num_options, swap it with the last one we're keeping
+                                if correct_answer_index >= num_options:
+                                    options[num_options-1], options[correct_answer_index] = options[correct_answer_index], options[num_options-1]
+                            options = options[:num_options]
+
+                # Final validation of correct answer
+                if correct_answer is None or correct_answer == "":
+                    print(f"Warning: Empty correct answer for question {idx}")
+                    if options:
+                        correct_answer = options[0]  # Use first option as default
+                    else:
+                        correct_answer = "Answer not provided"
+                
+                # Ensure explanation is present
+                if not explanation or explanation == "No explanation provided":
+                    explanation = f"The correct answer is {correct_answer}."
 
                 questions.append(QuizQuestion(
                     question=question_text,
                     options=options if options and q_type not in [QuestionType.fill_in_the_blank, QuestionType.short_answer] else None,
-                    correct_answer=correct_answer if not matching_pairs else correct_answer,
+                    correct_answer=correct_answer,
                     explanation=explanation,
                     question_type=q_type
                 ))
             except Exception as e:
                 print(f"Error parsing question block {idx}: {e}")
+                continue  # Skip this question and continue with the next
+    
+    # Return only the requested number of questions
     return questions[:num_questions]
 
 def generate_quiz_with_gemini(content: Union[str, List[Dict[str, Any]]], num_questions: int, num_options: int, question_types: Union[str, List[str]], difficulty: str):
@@ -258,10 +390,15 @@ def generate_quiz_with_gemini(content: Union[str, List[Dict[str, Any]]], num_que
             all_questions.extend(parse_gemini_response(result_text, n, q_type, num_options))
     else:
         for q_type in question_type_list:
-            prompt = get_question_prompt(text, q_type, num_questions, num_options, difficulty)
+            questions_per_type = num_questions // len(question_type_list)
+            remainder = num_questions % len(question_type_list)
+            n = questions_per_type + (1 if remainder > 0 else 0)
+            remainder -= 1 if remainder > 0 else 0
+            
+            prompt = get_question_prompt(text, q_type, n, num_options, difficulty)
             response = call_gemini_api([{"text": prompt}])
             result_text = response.get("candidates", [{}])[0].get("content", {}).get("parts", [{}])[0].get("text", "")
-            all_questions.extend(parse_gemini_response(result_text, num_questions, q_type, num_options))
+            all_questions.extend(parse_gemini_response(result_text, n, q_type, num_options))
 
     summary_prompt = f"Generate a brief summary (3-5 sentences) of the following text:\n\n{text}"
     summary_response = call_gemini_api([{"text": summary_prompt}])
@@ -299,6 +436,7 @@ async def generate_quiz_from_file(
         temp_path = temp.name
     try:
         file_extension = os.path.splitext(file.filename)[1].lower()
+        content = None
         if file_extension == ".docx":
             text = extract_text_from_docx(temp_path)
         elif file_extension == ".pdf":
@@ -310,6 +448,7 @@ async def generate_quiz_from_file(
             content = [{"inline_data": {"mime_type": f"image/{file_extension[1:]}", "data": base64_image}}]
         else:
             raise HTTPException(status_code=400, detail="Unsupported file format")
+        
         question_types = question_type.split(",") if "," in question_type else question_type
         return generate_quiz_with_gemini(
             content if file_extension in [".png", ".jpeg", ".jpg"] else text,
