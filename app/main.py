@@ -170,9 +170,45 @@ def parse_gemini_response(result_text: str, num_questions: int, requested_questi
                     if correct_answer in "abcdefghijklmnopqrstuvwxyz"[:num_options]:
                         correct_index = ord(correct_answer.lower()) - ord('a')
                         correct_answer = options[correct_index] if 0 <= correct_index < len(options) else "Invalid answer"
-                    # Ensure correct answer is in options; if not, adjust
+                    
+                    # Ensure correct answer is in options; if not, try to find it by checking explanation
                     if correct_answer not in options and options:
-                        correct_answer = options[0]  # Fallback to first option if mismatch
+                        # Try to find the correct answer by checking which option text appears in the explanation
+                        found_match = False
+                        # First, try to find direct mentions of options in the explanation
+                        for option in options:
+                            if option.lower() in explanation.lower():
+                                correct_answer = option
+                                found_match = True
+                                break
+                        
+                        # If no direct match found, try to find key phrases from the explanation in the options
+                        if not found_match:
+                            # Extract key phrases from explanation
+                            key_phrases = re.findall(r'"([^"]+)"', explanation)  # Look for quoted text
+                            if key_phrases:
+                                for phrase in key_phrases:
+                                    for option in options:
+                                        if phrase.lower() in option.lower():
+                                            correct_answer = option
+                                            found_match = True
+                                            break
+                                    if found_match:
+                                        break
+                        
+                        # If still no match, look for option letters in the explanation (e.g., "option c is correct")
+                        if not found_match:
+                            letter_match = re.search(r'option\s+([a-z])\s+is correct', explanation.lower())
+                            if letter_match:
+                                letter = letter_match.group(1)
+                                letter_index = ord(letter) - ord('a')
+                                if 0 <= letter_index < len(options):
+                                    correct_answer = options[letter_index]
+                                    found_match = True
+                            
+                        # If still no match, log a warning and keep original answer
+                        if not found_match:
+                            print(f"Warning: Correct answer '{correct_answer}' not found in options: {options}")
 
                 # Validate multiple-choice options count
                 if q_type == QuestionType.multiple_choice:
