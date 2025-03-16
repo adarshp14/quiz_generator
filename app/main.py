@@ -367,7 +367,7 @@ def parse_gemini_response(result_text: str, num_questions: int, requested_questi
     
     # Return only the requested number of questions
     return questions[:num_questions]
-
+    
 def generate_quiz_with_gemini(content: Union[str, List[Dict[str, Any]]], num_questions: int, num_options: int, question_types: Union[str, List[str]], difficulty: str):
     if isinstance(content, list) and "inline_data" in content[0]:
         text = extract_text_from_image(content[0]["inline_data"]["data"], content[0]["inline_data"]["mime_type"])
